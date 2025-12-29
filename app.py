@@ -125,7 +125,7 @@ def main_app():
                 st.write(f"正在翻译 {len(words_to_translate)} 个单词...")
                 for word in words_to_translate:
                     try:
-                        translation = translator.translate(word, src='en', dest='zh')
+                        translation = translator.translate(word, src='en', dest='zh-CN')
                         newly_translated_words.append((word, translation.text))
                         st.write(f"已翻译 '{word}' 为 '{translation.text}'")
                     except Exception as e:
