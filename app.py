@@ -1,4 +1,3 @@
-b%%writefile app.py
 import streamlit as st
 import gtts
 import pydu
@@ -228,4 +227,5 @@ def main_app():
 
 
 if __name__ == "__main__":
+
     main_app()
