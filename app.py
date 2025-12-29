@@ -1,9 +1,7 @@
 import streamlit as st
-import gtts
 from gtts import gTTS
 from pydub import AudioSegment
 import os
-import time
 from datetime import datetime
 from googletrans import Translator
 from io import BytesIO
@@ -20,51 +18,77 @@ OUTPUT_DIR = "audio_output"
 if not os.path.exists(OUTPUT_DIR):
     os.makedirs(OUTPUT_DIR)
 
+# --- Helper Functions ---
+
 @st.cache_resource
-def get_gtts_translator():
+def get_translator():
+    """初始化翻译器并缓存，避免重复创建"""
     return Translator()
 
 def create_audio_segment(text, lang='en', slow=False):
-    """使用gTTS生成文本的音频片段"""
-    tts = gTTS(text=text, lang=lang, slow=slow)
-    fp = BytesIO()
-    tts.write_to_fp(fp)
-    fp.seek(0)
-    return AudioSegment.from_file(fp, format="mp3")
+    """使用gTTS生成文本的音频片段，直接在内存中处理"""
+    try:
+        # 确保输入是字符串
+        tts = gTTS(text=str(text), lang=lang, slow=slow)
+        fp = BytesIO()
+        tts.write_to_fp(fp)
+        fp.seek(0)
+        return AudioSegment.from_file(fp, format="mp3")
+    except Exception as e:
+        print(f"Error creating audio for {text}: {e}")
+        # 出错时返回500ms静音，防止程序崩溃
+        return AudioSegment.silent(duration=500)
 
 def generate_word_audio(word, translation, repeat_count, slow_speed, spell_pause_ms, word_pause_ms):
-    """生成单个单词的完整听写音频片段，包含英文单词、拼读和中文翻译"""
+    """生成单个单词的完整听写音频片段"""
+    
+    # 1. 生成正常速度和慢速的单词音频
     full_word_audio_normal = create_audio_segment(word, slow=False)
     full_word_audio_slow = create_audio_segment(word, slow=True)
 
+    # 2. 生成拼读音频 (S-P-E-L-L)
     spelling_audio_segments = []
-    for char in word.replace(' ', ''): # 忽略空格进行拼读
+    # 过滤掉非字母字符，只拼读字母
+    clean_word = ''.join(filter(str.isalpha, word))
+    
+    for char in clean_word:
         char_audio = create_audio_segment(char, slow=False)
         spelling_audio_segments.append(char_audio)
         spelling_audio_segments.append(AudioSegment.silent(duration=spell_pause_ms))
 
     spelling_combined = AudioSegment.empty()
     if spelling_audio_segments:
+        # 去掉最后一个多余的停顿
         spelling_combined = sum(spelling_audio_segments[:-1])
 
+    # 3. 组合音频
     word_final_audio = AudioSegment.empty()
 
+    # A. 重复朗读单词
     for _ in range(repeat_count):
         word_final_audio += full_word_audio_normal if not slow_speed else full_word_audio_slow
-
+    
+    # B. 停顿 -> 拼读 -> 停顿
     word_final_audio += AudioSegment.silent(duration=word_pause_ms)
     word_final_audio += spelling_combined
     word_final_audio += AudioSegment.silent(duration=word_pause_ms)
+    
+    # C. 再次朗读单词
     word_final_audio += full_word_audio_normal if not slow_speed else full_word_audio_slow
     word_final_audio += AudioSegment.silent(duration=word_pause_ms)
 
+    # D. 中文翻译 (如果有)
     if translation:
+        # 使用 zh 生成中文语音
         chinese_audio = create_audio_segment(translation, lang='zh', slow=False)
         word_final_audio += chinese_audio
 
+    # E. 单词间的大停顿
     word_final_audio += AudioSegment.silent(duration=word_pause_ms * 2)
 
     return word_final_audio
+
+# --- Main Application ---
 
 def main_app():
     st.set_page_config(layout="wide", page_title="听写音频生成器")
@@ -75,7 +99,7 @@ def main_app():
     支持 **上传文件** 或 **直接粘贴文本**。
     """)
 
-    # --- 侧边栏配置 (保持不变) ---
+    # --- 侧边栏配置 ---
     st.sidebar.header("⚙️ 配置项")
     repeat_count = st.sidebar.number_input("每个单词朗读次数", min_value=1, max_value=5, value=DEFAULT_REPEAT_COUNT)
     words_per_file = st.sidebar.number_input("处理单词总数 (0表示所有单词)", min_value=0, value=DEFAULT_WORDS_PER_FILE)
@@ -83,15 +107,15 @@ def main_app():
     spell_pause_ms = st.sidebar.slider("拼读字母间停顿 (毫秒)", min_value=0, max_value=500, value=DEFAULT_SPELL_PAUSE_MS)
     word_pause_ms = st.sidebar.slider("单词朗读与拼读间停顿 (毫秒)", min_value=0, max_value=1000, value=DEFAULT_WORD_PAUSE_MS)
 
-    # ================= 修改开始：输入方式选择 =================
-    
-    # 定义临时文件路径
+    # --- 输入方式处理 ---
     temp_word_file_path = os.path.join("/tmp", "process_list.txt")
     has_valid_input = False
     source_name = "input_words"
 
-    # 创建两个选项卡
+    # 创建 Tab
     tab1, tab2 = st.tabs(["📂 上传文件 (txt)", "✍️ 直接输入文本"])
+
+    uploaded_file = None # 初始化变量
 
     with tab1:
         uploaded_file = st.file_uploader("选择 word.txt 文件", type=["txt"])
@@ -110,8 +134,8 @@ def main_app():
             placeholder="例如：\nApple\nBanana,香蕉\nOrange"
         )
         if user_text.strip():
-            # 如果输入了文本，且没有上传文件(或者用户想用文本覆盖)，则使用文本
-            # 这里逻辑是：只要文本框有字，就优先认为用户想处理文本框的内容（如果没上传文件的话）
+            # 逻辑：如果没有上传文件，或者虽然上传了但用户想用文本覆盖，则优先使用文本
+            # 但为了避免混淆，如果同时存在，我们在下面提示
             if not uploaded_file: 
                 with open(temp_word_file_path, "w", encoding="utf-8") as f:
                     f.write(user_text)
@@ -119,11 +143,9 @@ def main_app():
                 source_name = "手动输入列表.txt"
                 st.success("已加载手动输入的文本")
             elif uploaded_file:
-                st.info("检测到您同时上传了文件，系统将优先使用上传的文件。如需处理下方文本，请先移除上传的文件。")
+                st.info("⚠️ 检测到您同时上传了文件，系统将优先处理上传的文件。如需处理文本框内容，请先移除上传的文件。")
 
-    # ================= 修改结束 =================
-
-    # 只有当有有效输入时，才显示生成按钮
+    # --- 处理逻辑 ---
     if has_valid_input:
         st.divider()
         if st.button("🎵 开始生成音频", type="primary"):
@@ -132,7 +154,7 @@ def main_app():
             words_to_translate = []
             ordered_words_data = []
             
-            # --- 步骤 1: 读取文件 (逻辑复用) ---
+            # 1. 读取文件
             try:
                 with open(temp_word_file_path, 'r', encoding='utf-8') as f:
                     for line in f:
@@ -143,7 +165,6 @@ def main_app():
                         stripped_line = stripped_line.replace('，', ',')
                         parts = stripped_line.split(',', 1)
                         english_word = parts[0].strip()
-                        # 如果没有逗号，或者逗号后是空的，则视为需要翻译
                         chinese_translation = parts[1].strip() if len(parts) > 1 else ''
 
                         if not chinese_translation:
@@ -153,24 +174,25 @@ def main_app():
                 st.error(f"读取数据错误: {e}")
                 return
 
-            # --- 步骤 2: 翻译缺失的单词 ---
+            # 2. 翻译缺失的单词
             newly_translated_words = []
             if words_to_translate:
+                # 这里调用了之前丢失的 get_translator 函数
                 translator = get_translator()
                 status_bar = st.progress(0)
                 st.write(f"正在翻译 {len(words_to_translate)} 个单词...")
                 
                 for i, word in enumerate(words_to_translate):
                     try:
-                        # 修正了之前的 zh-cn 问题，改用 zh-CN
+                        # 使用 zh-CN 或 zh 提高成功率
                         translation = translator.translate(word, src='en', dest='zh-CN')
                         text_result = translation.text
                         newly_translated_words.append((word, text_result))
                     except Exception as e:
-                        # 再次尝试通用代码 zh
+                        # 备选重试
                         try:
-                             translation = translator.translate(word, src='en', dest='zh')
-                             newly_translated_words.append((word, translation.text))
+                            translation = translator.translate(word, src='en', dest='zh')
+                            newly_translated_words.append((word, translation.text))
                         except:
                             st.warning(f"翻译 '{word}' 失败，将跳过中文朗读。")
                             newly_translated_words.append((word, ""))
@@ -179,7 +201,7 @@ def main_app():
                 
                 st.success("翻译处理完成！")
 
-            # --- 步骤 3: 合并数据 ---
+            # 3. 合并数据
             final_words_dict = {word: translation for word, translation in ordered_words_data}
             for word_en, word_zh in newly_translated_words:
                 final_words_dict[word_en] = word_zh
@@ -189,7 +211,7 @@ def main_app():
             for word, _ in ordered_words_data:
                 words_data_for_audio.append((word, final_words_dict.get(word, "")))
 
-            # --- 步骤 4: 生成音频 ---
+            # 4. 生成音频
             if not words_data_for_audio:
                 st.warning("没有有效的单词数据。")
                 return
@@ -218,7 +240,7 @@ def main_app():
                 
                 audio_progress.progress((i + 1) / len(words_to_process))
 
-            # --- 步骤 5: 导出结果 ---
+            # 5. 导出结果
             if len(combined_audio_segment) > 0:
                 timestamp = datetime.now().strftime("%y%m%d-%H%M%S")
                 audio_buffer = BytesIO()
@@ -238,11 +260,7 @@ def main_app():
                 st.error("未能生成任何音频数据。")
     
     else:
-        # 如果没有输入任何内容
-        st.info("👈 请上传文件或输入单词列表以开始。")
+        st.info("👈 请在上方选项卡中 [上传文件] 或 [输入单词列表] 以开始。")
 
 if __name__ == "__main__":
-
     main_app()
-
-
