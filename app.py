@@ -1,6 +1,5 @@
 import streamlit as st
 import gtts
-import pydu
 from gtts import gTTS
 from pydub import AudioSegment
 import os
@@ -229,3 +228,4 @@ def main_app():
 if __name__ == "__main__":
 
     main_app()
+
