@@ -1,6 +1,6 @@
 streamlit
-gtts
+edge-tts
 pydub
-googletrans==4.0.0-rc1
-
+deep-translator
+pyaudioop
 
