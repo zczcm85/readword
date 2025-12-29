@@ -1,0 +1,7 @@
+[tool.streamlit]
+# Custom command to install FFmpeg if needed.
+# Streamlit Community Cloud usually has ffmpeg pre-installed,
+# but if not, you might need a different approach or a custom Dockerfile.
+# However, it's generally available.
+# If it throws an error during deployment, you might need to add a packages.txt
+# file in the root of your repo with 'ffmpeg' as a line.
