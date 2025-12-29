@@ -67,21 +67,15 @@ def generate_word_audio(word, translation, repeat_count, slow_speed, spell_pause
     return word_final_audio
 
 def main_app():
-    st.set_page_config(layout="wide")
+    st.set_page_config(layout="wide", page_title="听写音频生成器")
     st.title("📝 听写音频生成器")
 
     st.markdown("""
-    这个应用可以帮助你根据单词列表生成听写音频。它会自动翻译缺失的中文意思，并支持自定义朗读参数。
-    --- 
-    **使用步骤**:
-    1.  上传一个 `word.txt` 文件。
-    2.  调整左侧边栏的参数。
-    3.  点击 `生成音频` 按钮。
-    4.  下载生成的MP3文件。
+    这个应用可以帮助你根据单词列表生成听写音频。
+    支持 **上传文件** 或 **直接粘贴文本**。
     """)
 
-    uploaded_file = st.file_uploader("上传单词列表文件 (word.txt)", type=["txt"])
-    
+    # --- 侧边栏配置 (保持不变) ---
     st.sidebar.header("⚙️ 配置项")
     repeat_count = st.sidebar.number_input("每个单词朗读次数", min_value=1, max_value=5, value=DEFAULT_REPEAT_COUNT)
     words_per_file = st.sidebar.number_input("处理单词总数 (0表示所有单词)", min_value=0, value=DEFAULT_WORDS_PER_FILE)
@@ -89,143 +83,166 @@ def main_app():
     spell_pause_ms = st.sidebar.slider("拼读字母间停顿 (毫秒)", min_value=0, max_value=500, value=DEFAULT_SPELL_PAUSE_MS)
     word_pause_ms = st.sidebar.slider("单词朗读与拼读间停顿 (毫秒)", min_value=0, max_value=1000, value=DEFAULT_WORD_PAUSE_MS)
 
-    if uploaded_file is not None:
-        # Save uploaded file to a temporary location for processing
-        temp_word_file_path = os.path.join("/tmp", uploaded_file.name)
-        with open(temp_word_file_path, "wb") as f:
-            f.write(uploaded_file.getbuffer())
-        st.success(f"文件 '{uploaded_file.name}' 已成功上传。")
+    # ================= 修改开始：输入方式选择 =================
+    
+    # 定义临时文件路径
+    temp_word_file_path = os.path.join("/tmp", "process_list.txt")
+    has_valid_input = False
+    source_name = "input_words"
 
-        if st.button("生成音频"): # Moved button here
-            st.info("正在处理单词和生成音频...请稍候。")
+    # 创建两个选项卡
+    tab1, tab2 = st.tabs(["📂 上传文件 (txt)", "✍️ 直接输入文本"])
+
+    with tab1:
+        uploaded_file = st.file_uploader("选择 word.txt 文件", type=["txt"])
+        if uploaded_file is not None:
+            # 如果上传了文件，写入临时文件
+            with open(temp_word_file_path, "wb") as f:
+                f.write(uploaded_file.getbuffer())
+            has_valid_input = True
+            source_name = uploaded_file.name
+            st.success(f"已加载文件: {uploaded_file.name}")
+
+    with tab2:
+        user_text = st.text_area(
+            "在此输入或粘贴单词列表 (每行一个，格式：'单词' 或 '单词,中文')", 
+            height=200,
+            placeholder="例如：\nApple\nBanana,香蕉\nOrange"
+        )
+        if user_text.strip():
+            # 如果输入了文本，且没有上传文件(或者用户想用文本覆盖)，则使用文本
+            # 这里逻辑是：只要文本框有字，就优先认为用户想处理文本框的内容（如果没上传文件的话）
+            if not uploaded_file: 
+                with open(temp_word_file_path, "w", encoding="utf-8") as f:
+                    f.write(user_text)
+                has_valid_input = True
+                source_name = "手动输入列表.txt"
+                st.success("已加载手动输入的文本")
+            elif uploaded_file:
+                st.info("检测到您同时上传了文件，系统将优先使用上传的文件。如需处理下方文本，请先移除上传的文件。")
+
+    # ================= 修改结束 =================
+
+    # 只有当有有效输入时，才显示生成按钮
+    if has_valid_input:
+        st.divider()
+        if st.button("🎵 开始生成音频", type="primary"):
+            st.info(f"正在处理来源: {source_name}...请稍候。")
+            
             words_to_translate = []
             ordered_words_data = []
             
+            # --- 步骤 1: 读取文件 (逻辑复用) ---
             try:
                 with open(temp_word_file_path, 'r', encoding='utf-8') as f:
                     for line in f:
                         stripped_line = line.strip()
                         if not stripped_line:
                             continue
+                        # 兼容中文逗号
+                        stripped_line = stripped_line.replace('，', ',')
                         parts = stripped_line.split(',', 1)
                         english_word = parts[0].strip()
+                        # 如果没有逗号，或者逗号后是空的，则视为需要翻译
                         chinese_translation = parts[1].strip() if len(parts) > 1 else ''
 
                         if not chinese_translation:
                             words_to_translate.append(english_word)
                         ordered_words_data.append((english_word, chinese_translation))
-
-            except FileNotFoundError:
-                st.error(f"错误：找不到单词文件 '{uploaded_file.name}'。")
+            except Exception as e:
+                st.error(f"读取数据错误: {e}")
                 return
 
+            # --- 步骤 2: 翻译缺失的单词 ---
             newly_translated_words = []
             if words_to_translate:
-                translator = get_gtts_translator()
+                translator = get_translator()
+                status_bar = st.progress(0)
                 st.write(f"正在翻译 {len(words_to_translate)} 个单词...")
-                for word in words_to_translate:
+                
+                for i, word in enumerate(words_to_translate):
                     try:
+                        # 修正了之前的 zh-cn 问题，改用 zh-CN
                         translation = translator.translate(word, src='en', dest='zh-CN')
-                        newly_translated_words.append((word, translation.text))
-                        st.write(f"已翻译 '{word}' 为 '{translation.text}'")
+                        text_result = translation.text
+                        newly_translated_words.append((word, text_result))
                     except Exception as e:
-                        st.warning(f"翻译 '{word}' 时发生错误: {e}")
-                        newly_translated_words.append((word, "Translation Error"))
-                st.success("翻译完成！")
+                        # 再次尝试通用代码 zh
+                        try:
+                             translation = translator.translate(word, src='en', dest='zh')
+                             newly_translated_words.append((word, translation.text))
+                        except:
+                            st.warning(f"翻译 '{word}' 失败，将跳过中文朗读。")
+                            newly_translated_words.append((word, ""))
+                    
+                    status_bar.progress((i + 1) / len(words_to_translate))
+                
+                st.success("翻译处理完成！")
 
+            # --- 步骤 3: 合并数据 ---
             final_words_dict = {word: translation for word, translation in ordered_words_data}
             for word_en, word_zh in newly_translated_words:
                 final_words_dict[word_en] = word_zh
 
-            file_content = []
-            for word, original_translation in ordered_words_data:
-                translation = final_words_dict.get(word, original_translation)
-                file_content.append(f"{word},{translation}")
-
-            try:
-                # Overwrite the temp file with updated translations
-                with open(temp_word_file_path, 'w', encoding='utf-8') as f:
-                    for line in file_content:
-                        f.write(line + '\n')
-                st.success(f"单词文件 '{uploaded_file.name}' 已更新。")
-            except Exception as e:
-                st.error(f"更新单词文件 '{uploaded_file.name}' 时发生错误: {e}")
-                return
-
-            # --- Audio Generation Logic ---
+            # 准备生成音频的数据
             words_data_for_audio = []
-            try:
-                with open(temp_word_file_path, 'r', encoding='utf-8') as f:
-                    for line in f:
-                        stripped_line = line.strip()
-                        if not stripped_line:
-                            continue
-                        parts = stripped_line.split(',', 1)
-                        english_word = parts[0].strip()
-                        chinese_translation = parts[1].strip() if len(parts) > 1 else None
-                        words_data_for_audio.append((english_word, chinese_translation))
-            except FileNotFoundError:
-                st.error("音频生成：找不到更新后的单词文件。")
-                return
+            for word, _ in ordered_words_data:
+                words_data_for_audio.append((word, final_words_dict.get(word, "")))
 
+            # --- 步骤 4: 生成音频 ---
             if not words_data_for_audio:
-                st.warning("单词文件为空，没有单词可以生成音频。")
+                st.warning("没有有效的单词数据。")
                 return
 
-            words_to_process_limit = words_per_file if words_per_file > 0 else len(words_data_for_audio)
-            words_to_process = words_data_for_audio[:words_to_process_limit]
-            st.write(f"将从 '{uploaded_file.name}' 读取前 {len(words_to_process)} 个单词（及其翻译）生成音频...")
-
+            limit = words_per_file if words_per_file > 0 else len(words_data_for_audio)
+            words_to_process = words_data_for_audio[:limit]
+            
+            st.write(f"正在为 {len(words_to_process)} 个单词生成音频...")
+            
             combined_audio_segment = AudioSegment.empty()
-            progress_bar = st.progress(0)
+            audio_progress = st.progress(0)
             status_text = st.empty()
 
             for i, (word, translation) in enumerate(words_to_process):
-                translation_info = f" ({translation})" if translation else ""
-                status_text.text(f"正在生成单词音频：{word}{translation_info} ({i+1}/{len(words_to_process)})...")
-                try:
-                    word_audio = generate_word_audio(word,
-                                                     translation,
-                                                     repeat_count,
-                                                     slow_speed,
-                                                     spell_pause_ms,
-                                                     word_pause_ms)
-                    combined_audio_segment += word_audio
-                    progress_bar.progress((i + 1) / len(words_to_process))
-
-                except Exception as e:
-                    st.error(f"生成单词 '{word}' 音频时发生错误: {e}")
-                    continue
-
-            if combined_audio_segment:
-                timestamp = datetime.now().strftime("%y%m%d-%H%M%S")
-                output_filename = os.path.join(OUTPUT_DIR, f"dictation_combined_{timestamp}.mp3")
+                display_trans = f"({translation})" if translation else ""
+                status_text.text(f"正在生成: {word} {display_trans} ({i+1}/{len(words_to_process)})")
                 
-                # Export audio to a BytesIO object for download
+                try:
+                    word_audio = generate_word_audio(
+                        word, translation, repeat_count, slow_speed, 
+                        spell_pause_ms, word_pause_ms
+                    )
+                    combined_audio_segment += word_audio
+                except Exception as e:
+                    st.error(f"生成 '{word}' 音频失败: {e}")
+                
+                audio_progress.progress((i + 1) / len(words_to_process))
+
+            # --- 步骤 5: 导出结果 ---
+            if len(combined_audio_segment) > 0:
+                timestamp = datetime.now().strftime("%y%m%d-%H%M%S")
                 audio_buffer = BytesIO()
                 combined_audio_segment.export(audio_buffer, format="mp3")
                 audio_buffer.seek(0)
-
-                st.success("所有单词音频生成完毕！")
-                st.audio(audio_buffer.getvalue(), format='audio/mp3') # Play preview
-
+                
+                st.success("🎉 音频生成成功！")
+                st.audio(audio_buffer, format='audio/mp3')
+                
                 st.download_button(
-                    label="下载生成的音频文件",
-                    data=audio_buffer.getvalue(),
-                    file_name=f"dictation_combined_{timestamp}.mp3",
+                    label="⬇️ 下载 MP3 音频",
+                    data=audio_buffer,
+                    file_name=f"dictation_{timestamp}.mp3",
                     mime="audio/mp3"
                 )
             else:
-                st.warning("没有生成任何音频内容。")
-            status_text.empty() # Clear status text after completion
-
-    st.markdown("""
-    --- 
-    **关于 `gTTS` 语言代码的提示**: `gTTS` 对 `zh-cn` 等语言代码可能显示弃用警告，这是库内部的提示，不影响功能。我们已在代码中使用 `zh` 以提高兼容性。
-    """)
-
+                st.error("未能生成任何音频数据。")
+    
+    else:
+        # 如果没有输入任何内容
+        st.info("👈 请上传文件或输入单词列表以开始。")
 
 if __name__ == "__main__":
 
     main_app()
+
 
