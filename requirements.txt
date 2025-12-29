@@ -3,4 +3,3 @@ edge-tts
 pydub
 deep-translator
 pyaudioop
-
